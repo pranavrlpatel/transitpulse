@@ -70,3 +70,8 @@ export function injectAnomaly(stopId, severity = 0.8, type = "general") {
 export function clearAnomalies() {
   return request('/clear-anomalies', { method: 'POST' });
 }
+
+/** GET /weather — get live weather data from backend */
+export function fetchWeather() {
+  return request('/weather');
+}

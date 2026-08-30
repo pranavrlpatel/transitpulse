@@ -87,6 +87,38 @@ def predict_stop(
         delay=round(delay, 2),
     )
 
+@app.get("/predict-ml")
+def predict_stop_ml(
+    stop_id: str = Query(..., description="Stop ID, e.g. 20922"),
+    timestamp: str = Query(..., description="ISO-8601 datetime"),
+    weather_intensity_mm: float = Query(0.0, description="Weather intensity (0-15mm)")
+):
+    """Predict crowding using the Tier 2 XGBoost model."""
+    crowding = prediction.predict_crowding_ml(stop_id, timestamp, weather_intensity_mm)
+    tier = prediction.crowding_tier(crowding)
+    return {
+        "stop_id": stop_id,
+        "name": network.get_stop_name(stop_id),
+        "timestamp": timestamp,
+        "weather_intensity_mm": weather_intensity_mm,
+        "crowding": round(crowding, 4),
+        "tier": tier
+    }
+
+
+@app.get("/weather")
+def get_current_weather():
+    """Return the live weather data currently being used by the prediction engines."""
+    from . import weather
+    live_data = weather.get_live_weather()
+    return {
+        "status": "active",
+        "source": "Open-Meteo",
+        "is_raining": weather.is_raining(),
+        "precipitation_mm": weather.get_live_precipitation_mm(),
+        "raw_data": live_data
+    }
+
 
 @app.get("/route-crowding", response_model=list[StopCrowding])
 def route_crowding(
@@ -140,8 +172,8 @@ def clear_anomalies():
 
 @app.get("/reachable-stops", response_model=list[StopInfo])
 def get_reachable_stops(origin: str):
-    """Return all stops reachable from the origin within 2 transfers."""
-    reachable_ids = network.get_reachable_stops(origin, max_transfers=2)
+    """Return all stops reachable from the origin directly (0 transfers)."""
+    reachable_ids = network.get_reachable_stops(origin, max_transfers=0)
     return [
         StopInfo(stop_id=sid, name=network.get_stop_name(sid))
         for sid in reachable_ids

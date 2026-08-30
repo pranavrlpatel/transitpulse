@@ -20,17 +20,12 @@ from datetime import datetime
 from functools import lru_cache
 
 import pandas as pd
+from . import propagation, weather
 
-from . import propagation
-
-# ── Database path ────────────────────────────────────────────────────────────
+# ── Database path ─────────────────────────────────────────────────────────────
 _DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "transit_history.db")
 
-# Demo flag — in a real system this would come from a weather API
-WEATHER_RAINING = False
-
-
-# ── Historical data helpers ──────────────────────────────────────────────────
+# ── Historical data helpers ───────────────────────────────────────────────────
 
 @lru_cache(maxsize=1)
 def _get_base_capacity() -> dict[str, int]:
@@ -57,13 +52,14 @@ def _historical_avg(stop_id: str, hour: int, minute: int, dow: int) -> tuple[flo
     capacity = _get_base_capacity().get(stop_id, 100)
     
     hour_frac = hour + minute / 60.0
-    morning = _gaussian(hour_frac, 8.0, 1.5)
-    evening = _gaussian(hour_frac, 18.0, 1.5)
+    morning = _gaussian(hour_frac, 8.0, 2.0)
+    evening = _gaussian(hour_frac, 18.0, 2.0)
     peak = morning + evening
-    off_peak_floor = 0.08
-    rider = capacity * (off_peak_floor + 0.85 * peak)
+    off_peak_floor = 0.40  # Significantly higher base crowding
+    rider = capacity * (off_peak_floor + 0.60 * peak)
     
-    d_factor = 0.55 if dow >= 5 else 1.0
+    # Don't double penalize weekends here, just use a slight dip
+    d_factor = 0.85 if dow >= 5 else 1.0
     rider *= d_factor
     
     # Deterministic noise based on stop and time
@@ -82,7 +78,7 @@ def _historical_avg(stop_id: str, hour: int, minute: int, dow: int) -> tuple[flo
 
 
 
-# ── Public API ───────────────────────────────────────────────────────────────
+# ── Public API ────────────────────────────────────────────────────────────────
 
 def predict_crowding(stop_id: str, timestamp: datetime | str) -> float:
     """
@@ -104,18 +100,63 @@ def predict_crowding(stop_id: str, timestamp: datetime | str) -> float:
 
     base_ratio = avg_rider / capacity
     day_multiplier = 0.6 if dow >= 5 else 1.0
-    weather_multiplier = 1.15 if WEATHER_RAINING else 1.0
-    disruption_multiplier = propagation.get_disruption_multiplier(stop_id)
+    weather_multiplier = 1.15 if weather.is_raining() else 1.0
+    disruption_multiplier = propagation.get_disruption_multiplier(stop_id, timestamp)
 
     return base_ratio * day_multiplier * weather_multiplier * disruption_multiplier
+
+# ── ML Prediction (Tier 2 Showcase) ───────────────────────────────────────────
+
+_ml_model = None
+
+def _load_ml_model():
+    global _ml_model
+    if _ml_model is None:
+        import joblib
+        model_path = os.path.join(os.path.dirname(__file__), "..", "data", "crowding_model.joblib")
+        if os.path.exists(model_path):
+            _ml_model = joblib.load(model_path)
+    return _ml_model
+
+def predict_crowding_ml(stop_id: str, timestamp: datetime | str, weather_intensity_mm: float = None) -> float:
+    """
+    Return an XGBoost ML crowding prediction using the trained model.
+    """
+    if isinstance(timestamp, str):
+        timestamp = datetime.fromisoformat(timestamp)
+
+    if weather_intensity_mm is None or weather_intensity_mm == 0.0:
+        weather_intensity_mm = weather.get_live_precipitation_mm()
+
+    hour = timestamp.hour + timestamp.minute / 60.0
+    day_of_week = timestamp.weekday()
+    disruption_multiplier = propagation.get_disruption_multiplier(stop_id, timestamp)
+
+    model = _load_ml_model()
+    if not model:
+        return 0.0 # Fallback if model not trained yet
+
+    # Build the exact same feature vector as train_model.py
+    # Features: hour, day_of_week, weather_intensity_mm, disruption_multiplier_at_time
+    import pandas as pd
+    features = pd.DataFrame([{
+        'hour': hour,
+        'day_of_week': day_of_week,
+        'weather_intensity_mm': weather_intensity_mm,
+        'disruption_multiplier_at_time': disruption_multiplier
+    }])
+    
+    pred = float(model.predict(features)[0])
+    return max(0.0, pred)
+
 
 
 def predict_delay(stop_id: str, timestamp: datetime | str) -> float:
     """
     Return predicted delay in minutes.
 
-    Uses historical average delay plus any active-anomaly flat delay bump
-    (approximated via the disruption multiplier).
+    Uses historical average delay plus the type-specific added delay
+    from the propagation math.
     """
     if isinstance(timestamp, str):
         timestamp = datetime.fromisoformat(timestamp)
@@ -125,9 +166,9 @@ def predict_delay(stop_id: str, timestamp: datetime | str) -> float:
     dow = timestamp.weekday()
 
     _, _, avg_delay = _historical_avg(stop_id, hour, minute, dow)
-    disruption = propagation.get_disruption_multiplier(stop_id)
+    _, added_delay = propagation.get_disruption_impacts(stop_id, timestamp)
 
-    return avg_delay * disruption
+    return avg_delay + added_delay
 
 
 def crowding_tier(score: float) -> str:

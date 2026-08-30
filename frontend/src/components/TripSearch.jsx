@@ -1,31 +1,27 @@
-import { useState, useEffect, useRef } from 'react';
-import { fetchStops, fetchRecommend } from '../api';
+import { useState, useEffect } from 'react';
+import { fetchStops } from '../api';
 
-export default function TripSearch({ onResult }) {
+export default function TripSearch({ 
+  origin, setOrigin, 
+  destination, setDestination, 
+  targetTime, setTargetTime, 
+  onSearch, loading 
+}) {
   const [stops, setStops] = useState([]);
   const [destStops, setDestStops] = useState([]);
-  const [origin, setOrigin] = useState('');
-  const [destination, setDestination] = useState('');
   const [originLimit, setOriginLimit] = useState(10);
   const [destLimit, setDestLimit] = useState(10);
-  
-  const [targetTime, setTargetTime] = useState(() => {
-    const now = new Date();
-    now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
-    return now.toISOString().slice(0, 16);
-  });
-  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     fetchStops()
       .then((data) => {
         setStops(data);
-        if (data.length >= 2) {
+        if (data.length >= 2 && !origin) {
           setOrigin(data[0].stop_id);
         }
       })
       .catch(console.error);
-  }, []);
+  }, []); // Only fetch stops on mount
 
   useEffect(() => {
     if (!origin) return;
@@ -33,28 +29,14 @@ export default function TripSearch({ onResult }) {
       fetchReachableStops(origin)
         .then((data) => {
           setDestStops(data);
-          setDestLimit(10); // Reset destination limit when origin changes
-          if (data.length > 0 && !data.find(d => d.stop_id === destination)) {
+          setDestLimit(10);
+          if (data.length > 0 && (!destination || !data.find(d => d.stop_id === destination))) {
             setDestination(data[0].stop_id);
           }
         })
         .catch(console.error);
     });
-  }, [origin]);
-
-  const handleSearch = async () => {
-    if (!origin || !destination || origin === destination) return;
-    setLoading(true);
-    try {
-      const isoTime = new Date(targetTime).toISOString();
-      const result = await fetchRecommend(origin, destination, isoTime);
-      onResult(result);
-    } catch (err) {
-      console.error('Recommendation failed:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
+  }, [origin]); // Refetch reachable dests when origin changes
 
   const handleOriginChange = (e) => {
     const val = e.target.value;
@@ -140,7 +122,7 @@ export default function TripSearch({ onResult }) {
 
         <button
           className="btn-search"
-          onClick={handleSearch}
+          onClick={onSearch}
           disabled={loading || !origin || !destination || origin === destination}
           id="search-button"
         >

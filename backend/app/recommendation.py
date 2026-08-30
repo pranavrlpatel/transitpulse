@@ -62,7 +62,7 @@ def find_route_options(
                     parts.append(p_routes[i])
             found_paths.append({
                 "type": "multi",
-                "path_label": " → ".join(parts),
+                "path_label": " -> ".join(parts),
                 "stops": p_stops
             })
             if len(found_paths) >= 20:
@@ -89,7 +89,7 @@ def find_route_options(
                         queue.append((curr_stop, nxt_route, p_stops, p_routes[:-1] + [nxt_route]))
 
     # Sort options by number of transfers, then total travel time (stops)
-    found_paths.sort(key=lambda x: (x["path_label"].count("→"), len(x["stops"])))
+    found_paths.sort(key=lambda x: (x["path_label"].count("->"), len(x["stops"])))
 
     # Deduplicate
     unique_paths = []
@@ -108,12 +108,13 @@ def find_route_options(
 def _score_option(
     stops: list[str],
     departure: datetime,
+    wait_time_minutes: float = 0.0,
 ) -> tuple[float, float, float]:
     """
     Compute aggregate (score, avg_crowding, avg_delay) for a list of stops
     at a given departure time.
 
-    score = avg_crowding * 0.6 + normalized_delay * 0.4
+    score = avg_crowding * 0.6 + normalized_delay * 0.2 + normalized_wait * 0.2
     """
     crowdings: list[float] = []
     delays: list[float] = []
@@ -127,10 +128,12 @@ def _score_option(
     avg_crowding = sum(crowdings) / len(crowdings) if crowdings else 0.0
     avg_delay = sum(delays) / len(delays) if delays else 0.0
 
-    # Normalize delay: treat 15 min as the "max reasonable" delay -> 1.0
-    norm_delay = min(avg_delay / 15.0, 1.0)
+    # Normalize delay and wait time: treat 60 min as max -> 1.0
+    norm_delay = min(avg_delay / 60.0, 1.0)
+    norm_wait = min(wait_time_minutes / 60.0, 1.0)
 
-    score = avg_crowding * 0.6 + norm_delay * 0.4
+    # Heavily penalize waiting so the AI prefers jumping on a transfer route right now
+    score = avg_crowding * 0.6 + norm_delay * 0.2 + norm_wait * 0.8
     return score, avg_crowding, avg_delay
 
 
@@ -159,10 +162,10 @@ def recommend(
     scored: list[dict[str, Any]] = []
     for opt in route_options:
         stops = opt["stops"]
-        # Check every 5 min from +5 min to +30 min after target_time
-        for delta_min in range(5, 31, 5):
+        # Check every 5 min from 0 min to +30 min after target_time
+        for delta_min in range(0, 31, 5):
             dep = target_time + timedelta(minutes=delta_min)
-            score, avg_c, avg_d = _score_option(stops, dep)
+            score, avg_c, avg_d = _score_option(stops, dep, wait_time_minutes=delta_min)
             entry = {
                 **opt,
                 "departure_time": dep.isoformat(),
@@ -178,7 +181,7 @@ def recommend(
 
     # ── Naive option: first route, exactly at target_time ────────────
     first_opt = route_options[0]
-    n_score, n_c, n_d = _score_option(first_opt["stops"], target_time)
+    n_score, n_c, n_d = _score_option(first_opt["stops"], target_time, wait_time_minutes=0.0)
     naive = {
         **first_opt,
         "departure_time": target_time.isoformat(),
